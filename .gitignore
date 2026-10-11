@@ -1,0 +1,30 @@
+
+# Dependencies
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.env.local
+*.env.*.local
+
+# Build output
+dist/
+coverage/
+
+# Generated backend files
+backend/public/
+
+# Terraform generated files and secrets
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfvars
+*.tfplan
+crash.log
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+# OPTIONAL: only starts a local MongoDB (easiest way if you have Docker Desktop).
+# Run from the project root:  docker compose up -d
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+volumes:
+  mongo_data:

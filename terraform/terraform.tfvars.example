@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. NEVER commit real values.
+aws_region    = "ap-south-1"
+mongodb_uri   = "mongodb+srv://USER:PASSWORD@CLUSTER.mongodb.net/securesure"
+jwt_secret    = "a-long-random-string"
+llm_provider  = "anthropic"
+anthropic_api_key = "sk-ant-..."
+desired_count = 0   # change to 1 after pushing the Docker image
