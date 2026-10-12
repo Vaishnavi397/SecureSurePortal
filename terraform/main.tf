@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
   }
 }
 
@@ -18,26 +22,28 @@ provider "aws" {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_vpc" "default" {
-  default = true
-}
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
+
+# data "aws_vpc" "default" {
+#   default = true
+# }
+# data "aws_subnets" "default" {
+#   filter {
+#     name   = "vpc-id"
+#     values = [data.aws_vpc.default.id]
+#   }
+# }
 
 locals {
-  name   = "${var.project_name}-${var.environment}"
-  image  = var.container_image != "" ? var.container_image : "${aws_ecr_repository.app.repository_url}:latest"
-  tags   = { Project = var.project_name, Environment = var.environment, ManagedBy = "terraform" }
-  llm_env = [
-    { name = "LLM_PROVIDER", value = var.llm_provider },
-    { name = "LLM_BASE_URL", value = var.llm_base_url },
-    { name = "LLM_MODEL", value = var.llm_model },
-    { name = "LLM_API_KEY", value = var.llm_api_key }
-  ]
+  name          = "${var.project_name}-${var.environment}"
+  secret_prefix = "/${local.name}"
+  tags          = { Project = var.project_name, Environment = var.environment, ManagedBy = "terraform" }
+}
+
+# Package the Lambda build folder into a ZIP file.
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../backend/lambda-build"
+  output_path = "${path.module}/.terraform/lambda-deployment.zip"
 }
 
 # ---------- S3: insurance claim documents (TF3) ----------
@@ -64,16 +70,48 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "documents" {
   }
 }
 
-# ---------- ECR: container image repository ----------
-resource "aws_ecr_repository" "app" {
-  name         = local.name
-  force_delete = true
-  tags         = local.tags
+# --------------------------------------------------
+# SSM Parameter Store: application secrets
+# --------------------------------------------------
+
+resource "aws_ssm_parameter" "mongodb_uri" {
+  name  = "${local.secret_prefix}/MONGODB_URI"
+  type  = "SecureString"
+  value = var.mongodb_uri
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "jwt_secret" {
+  name  = "${local.secret_prefix}/JWT_SECRET"
+  type  = "SecureString"
+  value = var.jwt_secret
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "llm_api_key" {
+  name  = "${local.secret_prefix}/LLM_API_KEY"
+  type  = "SecureString"
+  value = var.llm_api_key
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "llm_base_url" {
+  name  = "${local.secret_prefix}/LLM_BASE_URL"
+  type  = "SecureString"
+  value = var.llm_base_url
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "llm_model" {
+  name  = "${local.secret_prefix}/LLM_MODEL"
+  type  = "SecureString"
+  value = var.llm_model
+  tags  = local.tags
 }
 
 # ---------- CloudWatch: logs + error alarm (AC15) ----------
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${local.name}"
+  name              = "/aws/lambda/${local.name}"
   retention_in_days = 7
   tags              = local.tags
 }
@@ -105,125 +143,181 @@ resource "aws_cloudwatch_metric_alarm" "app_errors" {
 }
 
 # ---------- IAM (TF4) ----------
-data "aws_iam_policy_document" "ecs_assume" {
+data "aws_iam_policy_document" "lambda_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
+      identifiers = ["lambda.amazonaws.com"]
     }
   }
 }
 
-# Execution role: lets ECS pull the image and write logs.
-resource "aws_iam_role" "execution" {
-  name               = "${local.name}-execution"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+# Execution role: lets Lambda pull the image and write logs.
+resource "aws_iam_role" "lambda" {
+  name               = "${local.name}-lambda-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
   tags               = local.tags
 }
-resource "aws_iam_role_policy_attachment" "execution" {
-  role       = aws_iam_role.execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+resource "aws_iam_role_policy_attachment" "lambda_logs" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+resource "aws_iam_role_policy" "lambda_access" {
+  name = "${local.name}-access"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters"
+        ]
+        Resource = [
+          aws_ssm_parameter.mongodb_uri.arn,
+          aws_ssm_parameter.jwt_secret.arn,
+          aws_ssm_parameter.llm_api_key.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject"
+        ]
+        Resource = "${aws_s3_bucket.documents.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.documents.arn
+      },
+      {
+        # Needed for the backend's asynchronous assessment job.
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.name}"
+      }
+    ]
+  })
 }
 
-# Task role: what the running app may do (least privilege: only this bucket).
-resource "aws_iam_role" "task" {
-  name               = "${local.name}-task"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
-  tags               = local.tags
-}
-data "aws_iam_policy_document" "task_s3" {
-  statement {
-    actions   = ["s3:PutObject", "s3:GetObject"]
-    resources = ["${aws_s3_bucket.documents.arn}/*"]
+# --------------------------------------------------
+# Lambda: Node.js backend
+# --------------------------------------------------
+
+resource "aws_lambda_function" "app" {
+  function_name = local.name
+  description   = "SecureSure insurance claims API"
+  role          = aws_iam_role.lambda.arn
+
+  runtime       = "nodejs22.x"
+  handler       = "src/lambda.handler"
+  architectures = ["arm64"]
+
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  memory_size = 1024
+  timeout     = 120
+
+  environment {
+    variables = {
+      NODE_ENV            = "production"
+      SECRETS_SSM_PREFIX  = local.secret_prefix
+      S3_BUCKET           = aws_s3_bucket.documents.id
+      CORS_ORIGIN         = var.cors_origin
+      LLM_PROVIDER        = var.llm_provider
+      LLM_BASE_URL        = var.llm_base_url
+      LLM_MODEL           = var.llm_model
+      LLM_TIMEOUT_MS      = "120000"
+      EMBEDDINGS_PROVIDER = "local"
+    }
   }
-  statement {
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.documents.arn]
-  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_logs,
+    aws_iam_role_policy.lambda_access,
+    aws_cloudwatch_log_group.app
+  ]
+
+  tags = local.tags
 }
-resource "aws_iam_role_policy" "task_s3" {
-  name   = "documents-bucket-access"
-  role   = aws_iam_role.task.id
-  policy = data.aws_iam_policy_document.task_s3.json
+
+# --------------------------------------------------
+# API Gateway: public HTTP endpoint
+# --------------------------------------------------
+
+resource "aws_apigatewayv2_api" "app" {
+  name          = "${local.name}-api"
+  protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = [var.cors_origin]
+    allow_methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    allow_headers = ["authorization", "content-type"]
+    max_age       = 300
+  }
+
+  tags = local.tags
+}
+
+resource "aws_apigatewayv2_integration" "lambda" {
+  api_id                 = aws_apigatewayv2_api.app.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.app.invoke_arn
+  payload_format_version = "2.0"
+  timeout_milliseconds   = 30000
+}
+
+resource "aws_apigatewayv2_route" "root" {
+  api_id    = aws_apigatewayv2_api.app.id
+  route_key = "ANY /"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_route" "proxy" {
+  api_id    = aws_apigatewayv2_api.app.id
+  route_key = "ANY /{proxy+}"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.app.id
+  name        = "$default"
+  auto_deploy = true
+
+  tags = local.tags
+}
+
+resource "aws_lambda_permission" "api_gateway" {
+  statement_id  = "AllowApiGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.app.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.app.execution_arn}/*/*"
 }
 
 # ---------- Network access ----------
-resource "aws_security_group" "app" {
-  name        = "${local.name}-app"
-  description = "Allow inbound app traffic"
-  vpc_id      = data.aws_vpc.default.id
+# resource "aws_security_group" "app" {
+#   name        = "${local.name}-app"
+#   description = "Allow inbound app traffic"
+#   vpc_id      = data.aws_vpc.default.id
 
-  ingress {
-    from_port   = var.container_port
-    to_port     = var.container_port
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_cidr]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  tags = local.tags
-}
-
-# ---------- ECS Fargate (TF2) ----------
-resource "aws_ecs_cluster" "main" {
-  name = local.name
-  tags = local.tags
-}
-
-resource "aws_ecs_task_definition" "app" {
-  family                   = local.name
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 1024
-  execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
-  tags                     = local.tags
-
-  container_definitions = jsonencode([
-    {
-      name         = "app"
-      image        = local.image
-      essential    = true
-      portMappings = [{ containerPort = var.container_port, protocol = "tcp" }]
-      environment = concat([
-        { name = "NODE_ENV", value = "production" },
-        { name = "PORT", value = tostring(var.container_port) },
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "S3_BUCKET", value = aws_s3_bucket.documents.id },
-        { name = "MONGODB_URI", value = var.mongodb_uri },
-        { name = "JWT_SECRET", value = var.jwt_secret },
-        { name = "LLM_PROVIDER", value = var.llm_provider },
-        { name = "CORS_ORIGIN", value = var.cors_origin },
-      ], local.llm_env)
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.app.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "app"
-        }
-      }
-    }
-  ])
-}
-
-resource "aws_ecs_service" "app" {
-  name            = local.name
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
-  tags            = local.tags
-
-  network_configuration {
-    subnets          = data.aws_subnets.default.ids
-    security_groups  = [aws_security_group.app.id]
-    assign_public_ip = true
-  }
-}
+#   ingress {
+#     from_port   = var.container_port
+#     to_port     = var.container_port
+#     protocol    = "tcp"
+#     cidr_blocks = [var.allowed_cidr]
+#   }
+#   egress {
+#     from_port   = 0
+#     to_port     = 0
+#     protocol    = "-1"
+#     cidr_blocks = ["0.0.0.0/0"]
+#   }
+#   tags = local.tags
+# }

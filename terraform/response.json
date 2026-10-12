@@ -1,0 +1,1 @@
+{"statusCode":404,"headers":{"x-powered-by":"Express","vary":"Origin","content-type":"application/json; charset=utf-8","content-length":"65","etag":"W/\"41-EsPPY/2kvIUHfoIFIpvBQ31gdMM\""},"isBase64Encoded":false,"body":"{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"Route not found: GET /\"}}"}

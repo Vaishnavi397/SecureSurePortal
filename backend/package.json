@@ -3,16 +3,21 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=18.18" },
+  "engines": {
+    "node": ">=18.18"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node src/seed.js",
     "test:rag": "node scripts/rag-test.js",
-    "test:smoke": "node scripts/smoke-test.js"
+    "test:smoke": "node scripts/smoke-test.js",
+    "build:lambda": "node scripts/build-lambda.js"
   },
   "dependencies": {
+    "@aws-sdk/client-lambda": "^3.1149.0",
     "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/client-ssm": "^3.800.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
     "@langchain/anthropic": "^0.3.0",
     "@langchain/core": "^0.3.0",
@@ -27,6 +32,7 @@
     "langchain": "^0.3.0",
     "mongoose": "^8.5.0",
     "multer": "^1.4.5-lts.1",
+    "serverless-http": "^3.2.0",
     "socket.io": "^4.7.5",
     "zod": "^3.23.8"
   },

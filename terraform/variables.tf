@@ -14,32 +14,10 @@ variable "environment" {
   default = "dev"
 }
 
-variable "container_image" {
-  description = "Full image URI. Leave empty to use <ecr repo>:latest created by this config."
-  type        = string
-  default     = ""
-}
-
-variable "container_port" {
-  type    = number
-  default = 8080
-}
-
-variable "desired_count" {
-  description = "Keep 0 for the first apply (no image pushed yet). Set to 1 after pushing the image."
-  type        = number
-  default     = 0
-}
-
-variable "allowed_cidr" {
-  description = "CIDR allowed to reach the app. Restrict to your IP/32 if you can."
-  type        = string
-  default     = "0.0.0.0/0"
-}
-
 variable "cors_origin" {
-  type    = string
-  default = "*"
+  description = "Frontend origin, such as https://localhost:5173"
+  type        = string
+  default     = "https://localhost:5173"
 }
 
 variable "llm_provider" {
@@ -54,6 +32,12 @@ variable "llm_model" {
   default     = "openrouter/free"
 }
 
+variable "llm_base_url" {
+  type      = string
+  sensitive = true
+  default   = "https://openrouter.ai/api/v1"
+}
+
 # ---- Secrets: supply via terraform.tfvars (git-ignored) or TF_VAR_* env vars. No defaults. ----
 variable "mongodb_uri" {
   description = "MongoDB Atlas connection string"
@@ -66,14 +50,19 @@ variable "jwt_secret" {
   sensitive = true
 }
 
-variable "llm_base_url" {
-  type      = string
-  sensitive = true
-  default   = "https://openrouter.ai/api/v1"
-}
-
 variable "llm_api_key" {
   type      = string
   sensitive = true
-  default   = ""
+}
+
+variable "desired_count" {
+  description = "Keep 0 for the first apply (no image pushed yet). Set to 1 after pushing the image."
+  type        = number
+  default     = 0
+}
+
+variable "allowed_cidr" {
+  description = "CIDR allowed to reach the app. Restrict to your IP/32 if you can."
+  type        = string
+  default     = "0.0.0.0/0"
 }
